@@ -21,16 +21,16 @@ import (
 	redis "gopkg.in/redis.v4"
 )
 
-const baseDir = "/projects/img"
+var imgBaseDir = ""
 
-const remoteImgURL = "http://mtv.mtvnimages.com/uri/"
+var remoteImgURL = ""
 
 const redisKeyPrefix = "imageServer_"
 
 //5 second timeout
 const imageFetchTimeout = time.Duration(5) * time.Second
 
-const imageNotFoundPath = "/cc_missing_v6.jpg"
+var imageNotFoundPath = ""
 
 // uri/mgid:file:gsp:entertainment-assets:/mtv/arc/images/news/DailyNewsHits/photos/160512_YACHT_SOCIAL_thumbnail.png
 const helpMsg = `<pre style="font-family:monospace">
@@ -97,26 +97,11 @@ var mgidPatterns = struct {
 	patterns map[string]string
 }{
 	patterns: map[string]string{
-		"mgid:file:gsp:entertainment-assets:": baseDir,
+		"mgid:file:gsp:entertainment-assets:": imgBaseDir,
 	},
 }
 
 var redisClient *redis.Client
-
-func init() {
-	fmt.Println("Init called")
-	imagick.Initialize()
-	defer imagick.Terminate()
-
-	redisClient = redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
-
-	pong, err := redisClient.Ping().Result()
-	fmt.Println(pong, err)
-}
 
 func handlerHelp(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
@@ -168,7 +153,7 @@ func findParams(s string, m string, p *parametersData) {
 		case "am":
 			p.am = nv[1]
 		default:
-			fmt.Printf("Unknown Parameter=%s for mgid=%s\n", nv[0], m)
+			fmt.Println("Unknown Parameter=", nv[0], "for mgid=", m)
 		}
 		fmt.Println("Found param: ", nv)
 	}
@@ -179,7 +164,7 @@ func setImageFetchLock(p string) bool {
 	k := redisKeyPrefix + p
 	v := redisClient.SetNX(k, "true", imageFetchTimeout)
 	if v.Err() != nil {
-		fmt.Println("Unsable to set the key: ", k, v.Err())
+		fmt.Println("Unable to set the key: ", k, v.Err())
 		panic("Error communicating with Redis")
 	}
 	return v.Val()
@@ -190,7 +175,7 @@ func getImageExtension(i string) string {
 }
 
 func loadMissingImage(mw *imagick.MagickWand) {
-	p := baseDir + imageNotFoundPath
+	p := imgBaseDir + imageNotFoundPath
 	err := mw.ReadImage(p)
 	if err != nil {
 		fmt.Println("Error opening file:", p)
@@ -206,7 +191,7 @@ func fetchRemoteImageURL(m string, p string, mw *imagick.MagickWand) {
 	defer resp.Body.Close()
 
 	if err != nil {
-		fmt.Printf("Error remote url fetch, path=%s", url)
+		fmt.Println("Error remote url fetch, path=", url)
 		loadMissingImage(mw)
 		return
 	}
@@ -222,7 +207,7 @@ func fetchRemoteImageURL(m string, p string, mw *imagick.MagickWand) {
 
 	//get image folder path
 	ifi := strings.LastIndex(p, "/")
-	ifp := p[:ifi]
+	ifp := imgBaseDir + p[:ifi]
 
 	fmt.Println("Creating Directories: ", ifp)
 
@@ -281,7 +266,7 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 		nv := po[:mi]
 		m = po[mi+1:]
 		//parse params
-		fmt.Printf("index=%d mgid=%s, params=%s\n", mi, m, nv)
+		fmt.Println("index=", mi, "mgid=", m ,"params=", mi, m, nv)
 		findParams(nv, m, &params)
 	case -1:
 		fmt.Fprint(w, "404: Invalid image request")
@@ -303,7 +288,7 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("File Path: %s\n", p)
+	fmt.Println("File Path:", p)
 
 	mw := imagick.NewMagickWand()
 
@@ -325,13 +310,13 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 			fetchRemoteImageURL(m, p, mw)
 		} else {
 			loadMissingImage(mw)
-			p = baseDir + imageNotFoundPath
+			p = imgBaseDir + imageNotFoundPath
 		}
 	}
 
 	//get extension
 	ext := getImageExtension(p)
-	fmt.Printf("Extension is: %s for path: %s\n", ext, p)
+	fmt.Println("Extension is:", ext, "for path:", p)
 
 	//Handle image format change
 	ah := r.Header.Get("Accept")
@@ -369,7 +354,7 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 
 	//Handle Resize
 	if params.rw > 0 || params.rh > 0 {
-		fmt.Printf("Resizing image: %s, width: %d height: %d", m, params.rw, params.rh)
+		fmt.Println("Resizing image:", m,", width:", params.rw, "height:", params.rh)
 		for i := 0; i < int(mw.GetNumberImages()); i++ {
 			mw.SetIteratorIndex(i)
 			mw.ThumbnailImage(params.rw, params.rh)
@@ -392,14 +377,15 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 	//Handle Quality
 	if params.q > 0 {
 		switch ext {
-		case "jpg":
-			mw.SetImageCompression(imagick.COMPRESSION_JPEG)
-		case "jpeg":
-			mw.SetImageCompression(imagick.COMPRESSION_JPEG)
 		case "png":
-			mw.SetImageCompression(imagick.COMPRESSION_LOSSLESS_JPEG)
 		case "webp":
 			mw.SetImageCompression(imagick.COMPRESSION_LOSSLESS_JPEG)
+			break
+		case "jpg":
+		case "jpeg":
+		default:
+			mw.SetImageCompression(imagick.COMPRESSION_JPEG)
+			break
 		}
 		mw.SetImageCompressionQuality(params.q)
 	}
@@ -411,7 +397,37 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	remoteImgURL = os.Getenv("REMOTE_IMG_URL")
+	if remoteImgURL == "" {
+		fmt.Println("Missing environment variable REMOTE_IMG_URL which should point to the remote base url to pass the requested paths onto")
+		os.Exit(1);
+	}
+	imgBaseDir = os.Getenv("IMG_PATH")
+	if imgBaseDir == "" {
+		fmt.Println("Missing enviroment variable IMG_PATH which should point to the folder path where your local images will be stored")
+		os.Exit(1);
+	}
+	imageNotFoundPath = os.Getenv("DEFAULT_IMG")
+	if imageNotFoundPath == "" {
+		fmt.Println("Missing environment variable DEFAULT_IMG which should be the path to the default image in the IMG_PATH")
+		os.Exit(1);
+	}
+
+	imagick.Initialize()
+	defer imagick.Terminate()
+
+	redisClient = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+
+	pong, err := redisClient.Ping().Result()
+	fmt.Println(pong, err)
+
 	http.HandleFunc("/uri/", handlerImageURI)
 	http.HandleFunc("/", handlerHelp)
 	http.ListenAndServe(":8080", nil)
+
+	fmt.Println("Image Server Ready")
 }
