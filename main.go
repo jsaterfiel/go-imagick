@@ -1,6 +1,6 @@
 // Image Server
 // Requirements:
-// - Imagemagick libs installed on machine with latest version
+// - Imagemagick libs installed on machine with latest version of 6 I have ImageMagick 6.9.8-10 Q16
 // - Redis server running locally with the standard ports on the latest version
 //
 // You will want to install these Go packages:
