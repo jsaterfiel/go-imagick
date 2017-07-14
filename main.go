@@ -118,7 +118,7 @@ func init() {
 	fmt.Println(pong, err)
 }
 
-func handlerHelp(w http.ResponseWriter, r *http.Request) {
+func handlerHelp(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	fmt.Fprint(w, helpMsg)
 }
