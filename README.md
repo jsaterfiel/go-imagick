@@ -34,6 +34,26 @@ Environment Variables used by GO and are all required:
  * Still image - the first frame of the animated gif.  Great for creating a placeholder then loading the animated gif later to cut down on bandwidth during initial page loads
  * Preview mode - reduces the frames of the animated gif to 5 and add a 1.5 second time between them.  Great if you need a wall of animated gif previews as it'll cut down on the sizes.
 
-#Docker Image
+# Docker Image
 Docker file has been including for building the docker image.  You will need to pass in the environment variables to the container when running it.
 
+Make sure to have a redis container running called redis:
+```
+docker run --name redis -d redis
+```
+Example container execution:
+```
+docker run -it \
+-e IMG_ID_URL=http://ent.mongo-arc-v2.mtvnservices.com/ \
+-e REMOTE_IMG_URL=https://comedycentral.mtvnimages.com/ \
+-e IMG_PATH=/tmp/images/ \
+-e DEFAULT_IMG=images/cc_missing_v6.jpg \
+-p 8080:8080 \
+--link redis:redis \
+--rm --name="go-images" go-images /go/src/app/main
+```
+
+Example url to call:
+```
+http://localhost:8080/uri/rw=480:rh=320:ch=600:cw=800:cx=200:cy=200:q=50/mgid:file:gsp:entertainment-assets:/cc/images/shows/tds/videos/season_21/21095/ds_21_095_act2.jpg
+```
