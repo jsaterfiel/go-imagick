@@ -9,18 +9,21 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	//"github.com/aws/aws-sdk-go/aws"
+	//"github.com/aws/aws-sdk-go/aws/session"
+	//"github.com/aws/aws-sdk-go/service/s3"
 	"gopkg.in/gographics/imagick.v2/imagick"
 	redis "gopkg.in/redis.v4"
-	"encoding/json"
-	"math"
 )
 
 var imgBaseDir string
@@ -46,6 +49,12 @@ var imageNotFoundPath string
 var imageIdQuery string
 
 var redisADDR string
+
+var redisClient *redis.Client
+
+var cacheRefresh = false
+
+//var s3Client *s3.S3
 
 const imageIdQueryString = "jp/[NAMESPACE]?&q={%22select%22:{%22VirtualImageParams%22:{%22*%22:1},%22ImageAssetRefs%22:{%22Height%22:1,%22Width%22:1,%22URI%22:1},%22ImagesWithCaptions%22:{%22Image%22:{%22VirtualImageParams%22:{%22*%22:1},%22ImageAssetRefs%22:{%22Height%22:1,%22Width%22:1,%22URI%22:1}}},%22VirtualImageParams%22:{%22*%22:1},%22Images%22:{%22VirtualImageParams%22:{%22*%22:1},%22ImageAssetRefs%22:{%22Height%22:1,%22Width%22:1,%22URI%22:1}}},%22vars%22:{},%22where%22:{%22byId%22:[%22[KEYID]%22]},%22start%22:0,%22rows%22:1,%22omitNumFound%22:true,%22debug%22:{}}&stage=authoring&filterSchedules=true&dateFormat=UTC"
 
@@ -130,36 +139,32 @@ type ResponseWrapper struct {
 }
 
 type ImageFormat struct {
-	TypeName	string
+	TypeName string
 }
 type ImageAssetRefs struct {
-	Format	ImageFormat
-	Height	uint
-	Width	uint
-	URI		string
+	Format ImageFormat
+	Height uint
+	Width  uint
+	URI    string
 }
 type VirtualImageParams struct {
-	TopLeftX	int
-	TopLeftY	int
-	CropSizeWidth	uint
-	CropSizeHeight	uint
+	TopLeftX       int
+	TopLeftY       int
+	CropSizeWidth  uint
+	CropSizeHeight uint
 }
 type Image struct {
-	ImageAssetRefs	[]ImageAssetRefs
+	ImageAssetRefs     []ImageAssetRefs
 	VirtualImageParams []VirtualImageParams
 }
 
 type Item struct {
-	Images []Image
-	ImagesWithCaptions []struct{
-		Image	Image
+	Images             []Image
+	ImagesWithCaptions []struct {
+		Image Image
 	}
 	Image
 }
-
-var redisClient *redis.Client
-
-var cacheRefresh = false
 
 func handlerHelp(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
@@ -258,7 +263,7 @@ func loadMissingImage(mw *imagick.MagickWand) {
 			fetchRemoteImageURL(imageNotFoundPath, imageNotFoundPath, mw)
 		} else {
 			fmt.Println("Cannot load default image", fp)
-			panic("Cannot load default image");
+			panic("Cannot load default image")
 		}
 	} else {
 		fmt.Println("Found image locally: ", fp)
@@ -276,7 +281,7 @@ func fetchRemoteImageURL(m string, p string, mw *imagick.MagickWand) {
 		fmt.Println("Error remote url fetch, path=", url)
 		loadMissingImage(mw)
 		return
-	}else{
+	} else {
 		defer resp.Body.Close()
 	}
 
@@ -308,7 +313,7 @@ func fetchRemoteImageURL(m string, p string, mw *imagick.MagickWand) {
 	if err != nil {
 		fmt.Println("Failed to create file: ", ip, err)
 		panic(err)
-	}else{
+	} else {
 		defer f.Close()
 	}
 
@@ -343,7 +348,7 @@ func getObjectHelper(id string, namespace string) json.RawMessage {
 		if err != nil {
 			fmt.Println("Error remote url fetch for object by url: ", u)
 			return nil
-		}else{
+		} else {
 			defer resp.Body.Close()
 		}
 
@@ -354,7 +359,7 @@ func getObjectHelper(id string, namespace string) json.RawMessage {
 		}
 
 		//save in cache
-		redisClient.Set(redisKeyCacheObjectPrefix + u, o, objectCacheTimeout)
+		redisClient.Set(redisKeyCacheObjectPrefix+u, o, objectCacheTimeout)
 	}
 
 	var data ResponseWrapper
@@ -393,7 +398,7 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 	}
 
 	if mgidPieces[1] != "arc" {
-		fmt.Println("invalid provider we only support arc currently");
+		fmt.Println("invalid provider we only support arc currently")
 		return "", 0, 0, 0, 0
 	}
 	raw := getObjectHelper(mgidPieces[4], mgidPieces[3])
@@ -410,7 +415,7 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 		for i := 0; i < len(item.ImagesWithCaptions); i++ {
 			imgs = append(imgs, item.ImagesWithCaptions[i].Image)
 		}
-		for i := 0; i < len(item.Images); i++{
+		for i := 0; i < len(item.Images); i++ {
 			imgs = append(imgs, item.Images[i])
 		}
 	}
@@ -424,7 +429,7 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 		return imgs[0].ImageAssetRefs[0].URI, 0, 0, 0, 0
 	}
 
-	ratio = math.Floor( (float64(width) / float64(height)) * 10 )
+	ratio = math.Floor((float64(width) / float64(height)) * 10)
 
 	//now run back through them all and find the image that best fits the requested width and height
 	//if only width or height are specified grab first image that is greater than the provided values
@@ -433,7 +438,7 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 		if bestImgInitted == false {
 			//always pick the first image by default
 			bestImg = imgs[i]
-			bestImgRatio = math.Floor( (float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10 )
+			bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
 			bestImgInitted = true
 
 			if len(imgs[i].VirtualImageParams) > 0 {
@@ -441,31 +446,31 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 				fmt.Println("best crop called", bestCropSet)
 				bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 				bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-				bestImgRatio = math.Floor( (float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10 )
+				bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
 
 				for j := 0; j < len(bestImg.VirtualImageParams); j++ {
-					newRatio := math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
+					newRatio := math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
 					diffWidth := math.Abs(float64(width - imgs[i].VirtualImageParams[j].CropSizeWidth))
 					diffHeight := math.Abs(float64(height - imgs[i].VirtualImageParams[j].CropSizeHeight))
 					fmt.Println("original ratio", ratio, "new ratio", newRatio)
-					if newRatio == ratio && ( diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight ) {
+					if newRatio == ratio && (diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
 						fmt.Println("1")
 						bestCropSet = imgs[i].VirtualImageParams[j]
 						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
-					}else if newRatio == ratio && bestImgRatio != ratio {
+						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+					} else if newRatio == ratio && bestImgRatio != ratio {
 						fmt.Println("2", newRatio, bestImgRatio, ratio)
 						bestCropSet = imgs[i].VirtualImageParams[j]
 						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
-					}else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
+						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+					} else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
 						fmt.Println("3")
 						bestCropSet = imgs[i].VirtualImageParams[j]
 						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
+						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
 					}
 				}
 			}
@@ -475,57 +480,57 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 				fmt.Println("best crop called", bestCropSet)
 				bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 				bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-				bestImgRatio = math.Floor( (float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10 )
+				bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
 
 				for j := 0; j < len(bestImg.VirtualImageParams); j++ {
-					newRatio := math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
+					newRatio := math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
 					diffWidth := math.Abs(float64(width - imgs[i].VirtualImageParams[j].CropSizeWidth))
 					diffHeight := math.Abs(float64(height - imgs[i].VirtualImageParams[j].CropSizeHeight))
 					fmt.Println("original ratio", ratio, "new ratio", newRatio)
-					if newRatio == ratio && ( diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight ) {
+					if newRatio == ratio && (diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
 						fmt.Println("1")
 						bestCropSet = imgs[i].VirtualImageParams[j]
 						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
-					}else if newRatio == ratio && bestImgRatio != ratio {
+						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+					} else if newRatio == ratio && bestImgRatio != ratio {
 						fmt.Println("2", newRatio, bestImgRatio, ratio)
 						bestCropSet = imgs[i].VirtualImageParams[j]
 						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
-					}else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
+						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+					} else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
 						fmt.Println("3")
 						bestCropSet = imgs[i].VirtualImageParams[j]
 						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor( (float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10 )
+						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
 					}
 				}
-			}else{
+			} else {
 				//image has no crop sets
-				newRatio := math.Floor( (float64(imgs[i].ImageAssetRefs[0].Width) / float64(imgs[i].ImageAssetRefs[0].Height)) * 10 )
+				newRatio := math.Floor((float64(imgs[i].ImageAssetRefs[0].Width) / float64(imgs[i].ImageAssetRefs[0].Height)) * 10)
 				diffWidth := math.Abs(float64(width - imgs[i].ImageAssetRefs[0].Width))
 				diffHeight := math.Abs(float64(height - imgs[i].ImageAssetRefs[0].Height))
-				fmt.Println("Image has no crop sets r",newRatio, ratio, "w", diffWidth, bestCropSetWidth, "h", diffHeight, bestCropSetHeight)
-				if newRatio == ratio && ( diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight ) {
+				fmt.Println("Image has no crop sets r", newRatio, ratio, "w", diffWidth, bestCropSetWidth, "h", diffHeight, bestCropSetHeight)
+				if newRatio == ratio && (diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
 					fmt.Println("b-1")
 					bestImg = imgs[i]
 					bestCropSetWidth = math.Abs(float64(width - bestImg.ImageAssetRefs[0].Width))
 					bestCropSetHeight = math.Abs(float64(height - bestImg.ImageAssetRefs[0].Height))
-					bestImgRatio = math.Floor( (float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10 )
-				}else if newRatio == ratio && bestImgRatio != ratio {
+					bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
+				} else if newRatio == ratio && bestImgRatio != ratio {
 					fmt.Println("b-2", newRatio, bestImgRatio, ratio)
 					bestImg = imgs[i]
 					bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 					bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-					bestImgRatio = math.Floor( (float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10 )
-				}else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
+					bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
+				} else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
 					fmt.Println("b-3")
 					bestImg = imgs[i]
 					bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
 					bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-					bestImgRatio = math.Floor( (float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10 )
+					bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
 				}
 			}
 		}
@@ -533,7 +538,7 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 
 	fmt.Println("By Id best img uri found was:", bestImg.ImageAssetRefs[0].URI)
 	if bestCropSet.CropSizeWidth > 0 {
-		fmt.Println("Best virtual cropset found w:", bestCropSet.CropSizeWidth,"h:", bestCropSet.CropSizeHeight, "x:", bestCropSet.TopLeftX, "y:", bestCropSet.TopLeftY)
+		fmt.Println("Best virtual cropset found w:", bestCropSet.CropSizeWidth, "h:", bestCropSet.CropSizeHeight, "x:", bestCropSet.TopLeftX, "y:", bestCropSet.TopLeftY)
 		return bestImg.ImageAssetRefs[0].URI, bestCropSet.CropSizeWidth, bestCropSet.CropSizeHeight, bestCropSet.TopLeftX, bestCropSet.TopLeftY
 	}
 	return bestImg.ImageAssetRefs[0].URI, 0, 0, 0, 0
@@ -564,11 +569,11 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 		nv := po[:mi]
 		id = po[mi+1:]
 		//parse params
-		fmt.Println("index=", mi, "mgid=", id ,"params=", mi, id, nv)
+		fmt.Println("index=", mi, "mgid=", id, "params=", mi, id, nv)
 		findParams(nv, id, &params)
 	case -1:
 		fmt.Println("404: Invalid image request")
-		return nil,""
+		return nil, ""
 	case 0:
 		fmt.Println("No params found for path: ", po)
 		id = po
@@ -589,11 +594,11 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 			params.cy = cy
 		}
 
-		if id == "" || p =="" {
+		if id == "" || p == "" {
 			//no image found so return missing image
 			loadMissingImage(mw)
 			fp = imgBaseDir + imageNotFoundPath
-		}else{
+		} else {
 			fp = imgBaseDir + p
 		}
 
@@ -604,7 +609,7 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 
 		if p == "" {
 			fmt.Println("Invalid id requested: ", id)
-			return nil,""
+			return nil, ""
 		}
 
 		fp = imgBaseDir + p
@@ -663,7 +668,7 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 
 	//Handle Resize
 	if params.rw > 0 || params.rh > 0 {
-		fmt.Println("Resizing image:", id,", width:", params.rw, "height:", params.rh)
+		fmt.Println("Resizing image:", id, ", width:", params.rw, "height:", params.rh)
 		for i := 0; i < int(mw.GetNumberImages()); i++ {
 			mw.SetIteratorIndex(i)
 			mw.ThumbnailImage(params.rw, params.rh)
@@ -743,7 +748,7 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 		//remove the original prefix of the path which is always 5 characters as it's uri/
 		i, f = generateImage(params, r.Header.Get("Accept"), r.URL.Path[5:], false)
 		//add to redis cache
-		scf := redisClient.Set(redisKeyCacheFormatPrefix + r.URL.Path, f, imageCacheTimeout)
+		scf := redisClient.Set(redisKeyCacheFormatPrefix+r.URL.Path, f, imageCacheTimeout)
 		if scf.Err() != nil {
 			//failed to save the image cache to redis
 			fmt.Println("Failed to save an image format to redis cache", r.URL.Path, scf.Err())
@@ -791,7 +796,7 @@ func handlerImageId(w http.ResponseWriter, r *http.Request) {
 	_, cacheRefresh = qs["cacheRefresh"]
 
 	//check to see if the image is in redis cache
-	if cacheRefresh ==  false {
+	if cacheRefresh == false {
 		cc = redisClient.Get(redisKeyCachePrefix + r.URL.Path)
 		i, err = cc.Bytes()
 	}
@@ -815,7 +820,7 @@ func handlerImageId(w http.ResponseWriter, r *http.Request) {
 		//remove the original prefix of the path which is always 5 characters as it's uri/
 		i, f = generateImage(params, r.Header.Get("Accept"), r.URL.Path[5:], true)
 		//add to redis cache
-		scf := redisClient.Set(redisKeyCacheFormatPrefix + r.URL.Path, f, imageCacheTimeout)
+		scf := redisClient.Set(redisKeyCacheFormatPrefix+r.URL.Path, f, imageCacheTimeout)
 		if scf.Err() != nil {
 			//failed to save the image cache to redis
 			fmt.Println("Failed to save an image format to redis cache", r.URL.Path, scf.Err())
@@ -831,7 +836,6 @@ func handlerImageId(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
 
 	//everything failed check
 	if i == nil {
@@ -886,8 +890,29 @@ func main() {
 
 	fmt.Println("Image Server Ready")
 
+	//sess, err := session.NewSession(&aws.Config{
+	//	Region: aws.String("us-east-1")},
+	//)
+
+	// Create S3 service client
+	//s3Client := s3.New(sess)
+	//
+	//resp, err := s3Client.ListObjects(&s3.ListObjectsInput{Bucket: aws.String("images-viacom")})
+	//
+	//if err != nil {
+	//	fmt.Println("Unable to list items in bucket", err)
+	//}
+	//
+	//for _, item := range resp.Contents {
+	//	fmt.Println("Name:         ", *item.Key)
+	//	fmt.Println("Last modified:", *item.LastModified)
+	//	fmt.Println("Size:         ", *item.Size)
+	//	fmt.Println("Storage class:", *item.StorageClass)
+	//	fmt.Println("")
+	//}
+
 	http.HandleFunc("/uri/", handlerImageURI)
-	http.HandleFunc( "/oid/", handlerImageId)
+	http.HandleFunc("/oid/", handlerImageId)
 	http.HandleFunc("/", handlerHelp)
 	http.ListenAndServe(":8080", nil)
 }

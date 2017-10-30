@@ -41,6 +41,10 @@ Make sure to have a redis container running called redis:
 ```
 docker run --name redis -d redis
 ```
+Build the contianer:
+```
+docker build -t go-images .
+```
 Example container execution:
 ```
 docker run -it \
