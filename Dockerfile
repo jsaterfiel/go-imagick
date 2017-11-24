@@ -1,4 +1,4 @@
-FROM golang:1.8-alpine
+FROM golang:1.9-alpine
 
 WORKDIR /go/src/app
 COPY . .
@@ -16,4 +16,4 @@ RUN go-wrapper install    # "go install -v ./..."
 # RUN apk del build-stuff
 RUN go build main.go
 
-CMD ["/go/src/app/main"]
+CMD ["/bin/sh", "/go/src/app/main"]

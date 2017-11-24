@@ -4,11 +4,12 @@
 // - Redis server running locally with the standard ports on the latest version
 //
 // You will want to install these Go packages:
-// go get gopkg.in/gographics/imagick.v2/imagick  (see: https://github.com/gographics/imagick)
+// go get gopkg.in/gographics/imagick.v3/imagick  (see: https://github.com/gographics/imagick)
 // go get gopkg.in/redis.v4 (see: https://github.com/go-redis/redis)
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -19,10 +20,10 @@ import (
 	"strings"
 	"time"
 
-	//"github.com/aws/aws-sdk-go/aws"
-	//"github.com/aws/aws-sdk-go/aws/session"
-	//"github.com/aws/aws-sdk-go/service/s3"
-	"gopkg.in/gographics/imagick.v2/imagick"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"gopkg.in/gographics/imagick.v3/imagick"
 	redis "gopkg.in/redis.v4"
 )
 
@@ -46,17 +47,15 @@ const objectCacheTimeout = time.Duration(1) * time.Hour
 
 var imageNotFoundPath string
 
-var imageIdQuery string
+var imageIDQuery string
 
 var redisADDR string
 
 var redisClient *redis.Client
 
-var cacheRefresh = false
-
 //var s3Client *s3.S3
 
-const imageIdQueryString = "jp/[NAMESPACE]?&q={%22select%22:{%22VirtualImageParams%22:{%22*%22:1},%22ImageAssetRefs%22:{%22Height%22:1,%22Width%22:1,%22URI%22:1},%22ImagesWithCaptions%22:{%22Image%22:{%22VirtualImageParams%22:{%22*%22:1},%22ImageAssetRefs%22:{%22Height%22:1,%22Width%22:1,%22URI%22:1}}},%22VirtualImageParams%22:{%22*%22:1},%22Images%22:{%22VirtualImageParams%22:{%22*%22:1},%22ImageAssetRefs%22:{%22Height%22:1,%22Width%22:1,%22URI%22:1}}},%22vars%22:{},%22where%22:{%22byId%22:[%22[KEYID]%22]},%22start%22:0,%22rows%22:1,%22omitNumFound%22:true,%22debug%22:{}}&stage=authoring&filterSchedules=true&dateFormat=UTC"
+const imageIDQueryString = "jp/[NAMESPACE]?&q={%22select%22:{%22virtualImageParams%22:{%22*%22:1},%22imageAssetRefs%22:{%22height%22:1,%22width%22:1,%22URI%22:1},%22ImagesWithCaptions%22:{%22Image%22:{%22virtualImageParams%22:{%22*%22:1},%22imageAssetRefs%22:{%22height%22:1,%22width%22:1,%22URI%22:1}}},%22virtualImageParams%22:{%22*%22:1},%22Images%22:{%22virtualImageParams%22:{%22*%22:1},%22imageAssetRefs%22:{%22height%22:1,%22width%22:1,%22URI%22:1}}},%22vars%22:{},%22where%22:{%22byId%22:[%22[KEYID]%22]},%22start%22:0,%22rows%22:1,%22omitNumFound%22:true,%22debug%22:{}}&stage=authoring&filterSchedules=true&dateFormat=UTC"
 
 // uri/mgid:file:gsp:entertainment-assets:/mtv/arc/images/news/DailyNewsHits/photos/160512_YACHT_SOCIAL_thumbnail.png
 const helpMsg = `<pre style="font-family:monospace">
@@ -113,57 +112,69 @@ am=p - Get animated gif in preview mode which reduces the frames to 5 and sets t
 Query String Parameters:
 ------------------------------------------------------------------------------------------------------------------------
 help - Returns this page
-debug - Returns information about how the requested url was processed. No image is returned. (not implemented yet)
+debug - Returns information about how the requested url was processed. No image is returned
 cacheRefresh - clears the cache for this image request and fetches the image from the remote url
 </pre>`
 
 type parametersData struct {
-	rw uint
-	rh uint
-	cw uint
-	ch uint
-	cx int
-	cy int
-	cc bool
-	q  uint
-	f  string
-	n  bool
-	am string
+	rw           uint
+	rh           uint
+	cw           uint
+	ch           uint
+	cx           int
+	cy           int
+	cc           bool
+	q            uint
+	f            string
+	n            bool
+	am           string
+	cacheRefresh bool
+	debug        bool
+	msgs         []string
 }
 
-//ResponseWrapper Arc response wrapper
-type ResponseWrapper struct {
-	Response struct {
-		Docs []json.RawMessage
+func (pd *parametersData) log(msg string) {
+	fmt.Println(msg)
+	if pd.debug {
+		pd.msgs = append(pd.msgs, msg)
 	}
 }
 
-type ImageFormat struct {
-	TypeName string
-}
-type ImageAssetRefs struct {
-	Format ImageFormat
-	Height uint
-	Width  uint
-	URI    string
-}
-type VirtualImageParams struct {
-	TopLeftX       int
-	TopLeftY       int
-	CropSizeWidth  uint
-	CropSizeHeight uint
-}
-type Image struct {
-	ImageAssetRefs     []ImageAssetRefs
-	VirtualImageParams []VirtualImageParams
+type responseWrapper struct {
+	response struct {
+		docs []json.RawMessage
+	}
 }
 
-type Item struct {
-	Images             []Image
-	ImagesWithCaptions []struct {
-		Image Image
+type imageFormat struct {
+	typeName string
+}
+
+type imageAssetRefs struct {
+	format imageFormat
+	height uint
+	width  uint
+	uri    string
+}
+
+type virtualImageParams struct {
+	topLeftX       int
+	topLeftY       int
+	cropSizeWeight uint
+	cropSizeHeight uint
+}
+
+type image struct {
+	imageAssetRefs     []imageAssetRefs
+	virtualImageParams []virtualImageParams
+}
+
+type item struct {
+	images             []image
+	imagesWithCaptions []struct {
+		image image
 	}
-	Image
+	image
 }
 
 func handlerHelp(w http.ResponseWriter, _ *http.Request) {
@@ -172,15 +183,18 @@ func handlerHelp(w http.ResponseWriter, _ *http.Request) {
 }
 
 func parseUint(s string) uint {
-	i, err := strconv.ParseUint(s, 10, 0)
+	i, err := strconv.ParseFloat(s, 10)
 	if err == nil {
+		if i < 1 {
+			i = i * 100
+		}
 		return uint(i)
 	}
 	fmt.Println("Failed to convert number: ", s)
 	return uint(0)
 }
 
-func findParams(s string, m string, p *parametersData) {
+func findParams(s string, m string, pd *parametersData) {
 	for _, v := range strings.Split(s, ":") {
 		nv := strings.Split(v, "=")
 		if len(nv) != 2 {
@@ -188,47 +202,60 @@ func findParams(s string, m string, p *parametersData) {
 		}
 		switch nv[0] {
 		case "rw":
-			p.rw = parseUint(nv[1])
+			pd.rw = parseUint(nv[1])
 		case "rh":
-			p.rh = parseUint(nv[1])
+			pd.rh = parseUint(nv[1])
 		case "cw":
-			p.cw = parseUint(nv[1])
+			pd.cw = parseUint(nv[1])
 		case "ch":
-			p.ch = parseUint(nv[1])
+			pd.ch = parseUint(nv[1])
 		case "cx":
 			i, err := strconv.Atoi(nv[1])
 			if err == nil {
-				p.cx = i
+				pd.cx = i
 			}
 		case "cy":
 			i, err := strconv.Atoi(nv[1])
 			if err == nil {
-				p.cy = i
+				pd.cy = i
 			}
 		case "cc":
-			p.cc = nv[1] == "1"
+			pd.cc = nv[1] == "1"
 		case "q":
-			p.q = parseUint(nv[1])
+			pd.q = parseUint(nv[1])
 		case "f":
-			p.f = nv[1]
+			pd.f = nv[1]
 		case "n":
-			p.n = nv[1] == "1"
+			pd.n = nv[1] == "1"
 		case "am":
-			p.am = nv[1]
+			pd.am = nv[1]
 		default:
-			fmt.Println("Unknown Parameter=", nv[0], "for mgid=", m)
+			fmt.Println("Unknown Parameter=", nv[0], ", for mgid=", m)
+			pd.log("Unknown Parameter: " + nv[0])
 		}
-		fmt.Println("Found param: ", nv)
+		pd.log("found param: " + nv[0] + "=" + nv[1])
 	}
 }
 
+func uintToString(v uint) string {
+	return strconv.FormatUint(uint64(v), 10)
+}
+
+func intToString(v int) string {
+	return strconv.FormatInt(int64(v), 10)
+}
+
+func floatToString(v float64) string {
+	return strconv.FormatFloat(float64(v), 'E', 3, 10)
+}
+
 // p is the path to the image
-func setImageFetchLock(p string) bool {
+func setImageFetchLock(p string, pd *parametersData) bool {
 	k := redisKeyLockPrefix + p
 	v := redisClient.SetNX(k, "true", imageFetchTimeout)
 	if v.Err() != nil {
 		fmt.Println("Unable to set the key: ", k, v.Err())
-		panic("Error communicating with Redis")
+		pd.log("Unable to set the key: " + k + "; ERROR: " + v.Err().Error())
 	}
 	return v.Val()
 }
@@ -236,69 +263,80 @@ func setImageFetchLock(p string) bool {
 // i is image path
 // f is the requested format (if any)
 // ha is header accept string
-func getImageFormat(i string, f string, ha string) string {
-	of := i[strings.LastIndex(i, ".")+1:]
+// ac is has alpha channel
+func getImageFormat(i string, f string, ha string, ac bool, pd *parametersData) string {
+	if f != "" {
+		return strings.ToLower(f)
+	}
 
-	fmt.Println("Extension is:", of, "for path:", i)
+	of := strings.ToLower(i[strings.LastIndex(i, ".")+1:])
 
 	//Handle image format change
-	fmt.Println("Header: ", ha)
 	if strings.Contains(ha, "image/webp") {
 		of = "webp"
-		fmt.Println("Browser requested webp for image: ", i)
+		pd.log("browser accepts webp changing image format to webp")
+	} else if of != "gif" && !ac || of == "jpeg" {
+		pd.log("changing image format to jpeg")
+		of = "jpg"
 	}
 
 	return of
 }
 
-func loadMissingImage(mw *imagick.MagickWand) {
+func loadMissingImage(mw *imagick.MagickWand, pd *parametersData) {
 	fp := imgBaseDir + imageNotFoundPath
 	//check if the file exists
 	i, err := ioutil.ReadFile(fp)
-	if err != nil {
+	if err != nil || i == nil {
 		//file not found locally fetch remote
 		//see if any other process is fetching the image.  if so then return 404 for now.
 		err = nil
-		if setImageFetchLock(fp) == true {
-			fetchRemoteImageURL(imageNotFoundPath, imageNotFoundPath, mw)
+		if setImageFetchLock(fp, pd) {
+			fetchRemoteImageURL(imageNotFoundPath, imageNotFoundPath, pd, mw)
 		} else {
 			fmt.Println("Cannot load default image", fp)
 			panic("Cannot load default image")
 		}
 	} else {
-		fmt.Println("Found image locally: ", fp)
-		mw.ReadImageBlob(i)
+		pd.log("Found image locally: " + fp)
+		err := mw.ReadImageBlob(i)
+		if err != nil {
+			fmt.Println("Error while reading image blob", err)
+			pd.log("Error while reading image blob: " + err.Error())
+		}
 	}
 }
 
-func fetchRemoteImageURL(m string, p string, mw *imagick.MagickWand) {
+func fetchRemoteImageURL(m string, p string, pd *parametersData, mw *imagick.MagickWand) {
 	url := remoteImgURL + m + "?q=.9"
-	fmt.Println("Remote fetch Image: ", url)
+	pd.log("Remote fetch Image: " + url)
 	//try to remotely fetch the image
 	resp, err := http.Get(url)
 
 	if err != nil {
-		fmt.Println("Error remote url fetch, path=", url)
-		loadMissingImage(mw)
+		fmt.Println("Error remote url fetch, path: ", url)
+		pd.log("Error remote url fetch, path: " + url)
+		loadMissingImage(mw, pd)
 		return
-	} else {
-		defer resp.Body.Close()
 	}
+
+	defer resp.Body.Close()
 
 	i, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
+	if err != nil || i == nil {
 		fmt.Println("Failed to fetch remote image: ", url, err)
-		loadMissingImage(mw)
+		pd.log("Failed to fetch remote image: " + err.Error())
+		loadMissingImage(mw, pd)
 		return
 	}
 
-	fmt.Println("Fetched Remote Image: ", url)
+	pd.log("Fetched Remote Image: " + url)
 
 	//get image folder path
 	ifi := strings.LastIndex(p, "/")
 	ifp := imgBaseDir + "/" + p[:ifi]
 
-	fmt.Println("Creating Directories: ", ifp)
+	pd.log("Creating Directories: " + ifp)
 
 	//write out the image to file for future usage
 	err = os.MkdirAll(ifp, 0777)
@@ -318,43 +356,61 @@ func fetchRemoteImageURL(m string, p string, mw *imagick.MagickWand) {
 	}
 
 	ib, err := f.Write(i)
-	fmt.Println("Bytes written to file: ", ip)
+	pd.log("Bytes written to file: " + ip)
 	if ib < 1 && err != nil {
 		fmt.Println("Failed to write to file: ", ip)
-		if err != nil {
-			panic(err)
-		}
+		pd.log("Failed to write to file: " + err.Error())
+		panic(err)
 	}
-
 	mw.ReadImageBlob(i)
 }
 
-func getObjectHelper(id string, namespace string) json.RawMessage {
+func saveImageInS3(path string, data []byte, pd *parametersData) {
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1")},
+	)
+	svc := s3manager.NewUploader(sess)
+	input := &s3manager.UploadInput{
+		Bucket: aws.String("images-viacom"),
+		Key:    aws.String(path),
+		Body:   bytes.NewReader(data),
+		ACL:    aws.String("public-read"),
+	}
+
+	_, err = svc.Upload(input)
+	if err != nil {
+		fmt.Println("failed to save image to s3:", err)
+		pd.log("failed to save image to s3: " + err.Error())
+	}
+}
+
+func getObjectHelper(id string, namespace string, pd *parametersData) json.RawMessage {
 	var o []byte
 	var rerr error
-	u := strings.Replace(imageIdQuery, "[NAMESPACE]", namespace, 1)
+	u := strings.Replace(imageIDQuery, "[NAMESPACE]", namespace, 1)
 	u = strings.Replace(u, "[KEYID]", id, 1)
-	fmt.Println("Fetching arc call: " + u)
+	pd.log("Fetching arc call: " + u)
 	//check cache to see if we've already made this call
-	if cacheRefresh == false {
+	if pd.cacheRefresh == false {
 		cc := redisClient.Get(redisKeyCacheObjectPrefix + u)
 		o, _ = cc.Bytes()
 	}
 	if o == nil {
 		//go get the data from arc
-		fmt.Println("fetching data from arc not found in cache")
+		pd.log("fetching data from arc not found in cache")
 		resp, err := http.Get(u)
 
 		if err != nil {
-			fmt.Println("Error remote url fetch for object by url: ", u)
+			fmt.Println("Error remote url fetch for object by url: ", u, err)
+			pd.log("Error remote url fetch for object by url: " + err.Error())
 			return nil
-		} else {
-			defer resp.Body.Close()
 		}
+		defer resp.Body.Close()
 
 		o, rerr = ioutil.ReadAll(resp.Body)
 		if rerr != nil {
 			fmt.Println("Error while fetching query", u, rerr)
+			pd.log("Error while fetching query: " + rerr.Error())
 			return nil
 		}
 
@@ -362,26 +418,26 @@ func getObjectHelper(id string, namespace string) json.RawMessage {
 		redisClient.Set(redisKeyCacheObjectPrefix+u, o, objectCacheTimeout)
 	}
 
-	var data ResponseWrapper
+	var data responseWrapper
 
 	if err := json.Unmarshal(o, &data); err != nil {
 		panic(err)
 	}
 
-	if len(data.Response.Docs) != 1 {
+	if len(data.response.docs) != 1 {
 		fmt.Println("Failed to fetch object by id:", id, " url: ", u)
 		return nil
 	}
-	return data.Response.Docs[0]
+	return data.response.docs[0]
 }
 
-//getBestImageByMgidId
+//getBestImageByMgidID
 //returns id, crop width, crop height, offset x, offset y
-func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uint, int, int) {
-	var item Item
-	var imgs []Image
-	var bestImg Image
-	var bestCropSet VirtualImageParams
+func getBestImageByMgidID(id string, pd *parametersData) (string, uint, uint, int, int) {
+	var item item
+	var imgs []image
+	var bestImg image
+	var bestCropSet virtualImageParams
 	var bestCropSetWidth float64
 	var bestCropSetHeight float64
 	var bestImgInitted = false
@@ -399,24 +455,25 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 
 	if mgidPieces[1] != "arc" {
 		fmt.Println("invalid provider we only support arc currently")
+		pd.log("invalid provider we only support arc currently")
 		return "", 0, 0, 0, 0
 	}
-	raw := getObjectHelper(mgidPieces[4], mgidPieces[3])
+	raw := getObjectHelper(mgidPieces[4], mgidPieces[3], pd)
 
 	json.Unmarshal(raw, &item)
 
-	if len(item.ImageAssetRefs) > 0 {
+	if len(item.imageAssetRefs) > 0 {
 		//image object
 		json.Unmarshal(raw, &bestImg)
 		imgs = append(imgs, bestImg)
 	} else {
 		//item object
 		//check imagewithcaptions first then images
-		for i := 0; i < len(item.ImagesWithCaptions); i++ {
-			imgs = append(imgs, item.ImagesWithCaptions[i].Image)
+		for i := 0; i < len(item.imagesWithCaptions); i++ {
+			imgs = append(imgs, item.imagesWithCaptions[i].image)
 		}
-		for i := 0; i < len(item.Images); i++ {
-			imgs = append(imgs, item.Images[i])
+		for i := 0; i < len(item.images); i++ {
+			imgs = append(imgs, item.images[i])
 		}
 	}
 
@@ -424,127 +481,129 @@ func getBestImageByMgidId(id string, width uint, height uint) (string, uint, uin
 		return "", 0, 0, 0, 0
 	}
 
-	if width == 0 || height == 0 {
+	if pd.cw == 0 || pd.ch == 0 {
 		//if neither width or height are provided then grab first image and live with it
-		return imgs[0].ImageAssetRefs[0].URI, 0, 0, 0, 0
+		return imgs[0].imageAssetRefs[0].uri, 0, 0, 0, 0
 	}
 
-	ratio = math.Floor((float64(width) / float64(height)) * 10)
+	ratio = math.Floor((float64(pd.cw) / float64(pd.ch)) * 10)
 
 	//now run back through them all and find the image that best fits the requested width and height
 	//if only width or height are specified grab first image that is greater than the provided values
+	pd.log("finding best image...")
 	for i := 0; i < len(imgs); i++ {
-		fmt.Println("img", i)
+		pd.log("img index: " + intToString(i))
 		if bestImgInitted == false {
-			//always pick the first image by default
+			pd.log("always pick the first image by default")
 			bestImg = imgs[i]
-			bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
+			bestImgRatio = math.Floor((float64(bestImg.imageAssetRefs[0].width) / float64(bestImg.imageAssetRefs[0].height)) * 10)
 			bestImgInitted = true
 
-			if len(imgs[i].VirtualImageParams) > 0 {
-				bestCropSet = imgs[i].VirtualImageParams[0]
-				fmt.Println("best crop called", bestCropSet)
-				bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-				bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-				bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
+			if len(imgs[i].virtualImageParams) > 0 {
+				bestCropSet = imgs[i].virtualImageParams[0]
+				pd.log("best crop called-init: ch=" + uintToString(bestCropSet.cropSizeHeight) + ", cw=" + uintToString(bestCropSet.cropSizeWeight) + ", x=" + intToString(bestCropSet.topLeftX) + ", y=" + intToString(bestCropSet.topLeftY))
+				bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+				bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+				bestImgRatio = math.Floor((float64(bestImg.imageAssetRefs[0].width) / float64(bestImg.imageAssetRefs[0].height)) * 10)
 
-				for j := 0; j < len(bestImg.VirtualImageParams); j++ {
-					newRatio := math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
-					diffWidth := math.Abs(float64(width - imgs[i].VirtualImageParams[j].CropSizeWidth))
-					diffHeight := math.Abs(float64(height - imgs[i].VirtualImageParams[j].CropSizeHeight))
-					fmt.Println("original ratio", ratio, "new ratio", newRatio)
-					if newRatio == ratio && (diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
-						fmt.Println("1")
-						bestCropSet = imgs[i].VirtualImageParams[j]
-						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+				for j := 0; j < len(bestImg.virtualImageParams); j++ {
+					newRatio := math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
+					diffwidth := math.Abs(float64(pd.cw - imgs[i].virtualImageParams[j].cropSizeWeight))
+					diffHeight := math.Abs(float64(pd.ch - imgs[i].virtualImageParams[j].cropSizeHeight))
+					pd.log("original ratio: " + floatToString(ratio) + ", new ratio: " + floatToString(newRatio))
+					if newRatio == ratio && (diffwidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
+						pd.log("picked cropset processing option 1-init")
+						bestCropSet = imgs[i].virtualImageParams[j]
+						bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+						bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+						bestImgRatio = math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
 					} else if newRatio == ratio && bestImgRatio != ratio {
-						fmt.Println("2", newRatio, bestImgRatio, ratio)
-						bestCropSet = imgs[i].VirtualImageParams[j]
-						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
-					} else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
-						fmt.Println("3")
-						bestCropSet = imgs[i].VirtualImageParams[j]
-						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+						pd.log("picked cropset processing option 2-init: newRatio=" + floatToString(newRatio) + ", bestImgRatio=" + floatToString(bestImgRatio) + ", ratio=" + floatToString(ratio))
+						bestCropSet = imgs[i].virtualImageParams[j]
+						bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+						bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+						bestImgRatio = math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
+					} else if bestImgRatio != ratio && diffwidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
+						pd.log("picked cropset processing option 3-init")
+						bestCropSet = imgs[i].virtualImageParams[j]
+						bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+						bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+						bestImgRatio = math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
 					}
 				}
 			}
 		} else {
-			if len(imgs[i].VirtualImageParams) > 0 {
-				bestCropSet = imgs[i].VirtualImageParams[0]
-				fmt.Println("best crop called", bestCropSet)
-				bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-				bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-				bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
+			if len(imgs[i].virtualImageParams) > 0 {
+				bestCropSet = imgs[i].virtualImageParams[0]
+				pd.log("best crop called: ch=" + uintToString(bestCropSet.cropSizeHeight) + ", cw=" + uintToString(bestCropSet.cropSizeWeight) + ", x=" + intToString(bestCropSet.topLeftX) + ", y=" + intToString(bestCropSet.topLeftY))
+				bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+				bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+				bestImgRatio = math.Floor((float64(bestImg.imageAssetRefs[0].width) / float64(bestImg.imageAssetRefs[0].height)) * 10)
 
-				for j := 0; j < len(bestImg.VirtualImageParams); j++ {
-					newRatio := math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
-					diffWidth := math.Abs(float64(width - imgs[i].VirtualImageParams[j].CropSizeWidth))
-					diffHeight := math.Abs(float64(height - imgs[i].VirtualImageParams[j].CropSizeHeight))
-					fmt.Println("original ratio", ratio, "new ratio", newRatio)
-					if newRatio == ratio && (diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
-						fmt.Println("1")
-						bestCropSet = imgs[i].VirtualImageParams[j]
-						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+				for j := 0; j < len(bestImg.virtualImageParams); j++ {
+					newRatio := math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
+					diffwidth := math.Abs(float64(pd.cw - imgs[i].virtualImageParams[j].cropSizeWeight))
+					diffHeight := math.Abs(float64(pd.ch - imgs[i].virtualImageParams[j].cropSizeHeight))
+					pd.log("original ratio: " + floatToString(ratio) + ", new ratio: " + floatToString(newRatio))
+					if newRatio == ratio && (diffwidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
+						pd.log("picked cropset processing option 1")
+						bestCropSet = imgs[i].virtualImageParams[j]
+						bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+						bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+						bestImgRatio = math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
 					} else if newRatio == ratio && bestImgRatio != ratio {
-						fmt.Println("2", newRatio, bestImgRatio, ratio)
-						bestCropSet = imgs[i].VirtualImageParams[j]
-						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
-					} else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
-						fmt.Println("3")
-						bestCropSet = imgs[i].VirtualImageParams[j]
-						bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-						bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-						bestImgRatio = math.Floor((float64(imgs[i].VirtualImageParams[j].CropSizeWidth) / float64(imgs[i].VirtualImageParams[j].CropSizeHeight)) * 10)
+						pd.log("picked cropset processing option 2: newRatio=" + floatToString(newRatio) + ", bestImgRatio=" + floatToString(bestImgRatio) + ", ratio=" + floatToString(ratio))
+						bestCropSet = imgs[i].virtualImageParams[j]
+						bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+						bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+						bestImgRatio = math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
+					} else if bestImgRatio != ratio && diffwidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
+						pd.log("picked cropset processing option 3")
+						bestCropSet = imgs[i].virtualImageParams[j]
+						bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+						bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+						bestImgRatio = math.Floor((float64(imgs[i].virtualImageParams[j].cropSizeWeight) / float64(imgs[i].virtualImageParams[j].cropSizeHeight)) * 10)
 					}
 				}
 			} else {
 				//image has no crop sets
-				newRatio := math.Floor((float64(imgs[i].ImageAssetRefs[0].Width) / float64(imgs[i].ImageAssetRefs[0].Height)) * 10)
-				diffWidth := math.Abs(float64(width - imgs[i].ImageAssetRefs[0].Width))
-				diffHeight := math.Abs(float64(height - imgs[i].ImageAssetRefs[0].Height))
-				fmt.Println("Image has no crop sets r", newRatio, ratio, "w", diffWidth, bestCropSetWidth, "h", diffHeight, bestCropSetHeight)
-				if newRatio == ratio && (diffWidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
-					fmt.Println("b-1")
+				newRatio := math.Floor((float64(imgs[i].imageAssetRefs[0].width) / float64(imgs[i].imageAssetRefs[0].height)) * 10)
+				diffwidth := math.Abs(float64(pd.cw - imgs[i].imageAssetRefs[0].width))
+				diffHeight := math.Abs(float64(pd.ch - imgs[i].imageAssetRefs[0].height))
+				pd.log("Image has no crop sets newRatio=" + floatToString(newRatio) + ", ratio=" + floatToString(ratio) + ", diffWidth=" + floatToString(diffwidth) + ", bestCropSetWidth=" + floatToString(bestCropSetWidth) + ", diffHeight=" + floatToString(diffHeight) + ", bestCropSetHeight=" + floatToString(bestCropSetHeight))
+				pd.log("checking image asset ref details to check ratio")
+				if newRatio == ratio && (diffwidth < bestCropSetWidth || diffHeight < bestCropSetHeight) {
+					pd.log("processing b-1")
 					bestImg = imgs[i]
-					bestCropSetWidth = math.Abs(float64(width - bestImg.ImageAssetRefs[0].Width))
-					bestCropSetHeight = math.Abs(float64(height - bestImg.ImageAssetRefs[0].Height))
-					bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
+					bestCropSetWidth = math.Abs(float64(pd.cw - bestImg.imageAssetRefs[0].width))
+					bestCropSetHeight = math.Abs(float64(pd.ch - bestImg.imageAssetRefs[0].height))
+					bestImgRatio = math.Floor((float64(bestImg.imageAssetRefs[0].width) / float64(bestImg.imageAssetRefs[0].height)) * 10)
 				} else if newRatio == ratio && bestImgRatio != ratio {
-					fmt.Println("b-2", newRatio, bestImgRatio, ratio)
+					pd.log("processing option b-2: newRatio=" + floatToString(newRatio) + ", bestImgRatio=" + floatToString(bestImgRatio) + ", ratio=" + floatToString(ratio))
 					bestImg = imgs[i]
-					bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-					bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-					bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
-				} else if bestImgRatio != ratio && diffWidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
-					fmt.Println("b-3")
+					bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+					bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+					bestImgRatio = math.Floor((float64(bestImg.imageAssetRefs[0].width) / float64(bestImg.imageAssetRefs[0].height)) * 10)
+				} else if bestImgRatio != ratio && diffwidth < bestCropSetWidth && diffHeight < bestCropSetHeight {
+					pd.log("processing b-3")
 					bestImg = imgs[i]
-					bestCropSetWidth = math.Abs(float64(width - bestCropSet.CropSizeWidth))
-					bestCropSetHeight = math.Abs(float64(height - bestCropSet.CropSizeHeight))
-					bestImgRatio = math.Floor((float64(bestImg.ImageAssetRefs[0].Width) / float64(bestImg.ImageAssetRefs[0].Height)) * 10)
+					bestCropSetWidth = math.Abs(float64(pd.cw - bestCropSet.cropSizeWeight))
+					bestCropSetHeight = math.Abs(float64(pd.ch - bestCropSet.cropSizeHeight))
+					bestImgRatio = math.Floor((float64(bestImg.imageAssetRefs[0].width) / float64(bestImg.imageAssetRefs[0].height)) * 10)
 				}
 			}
 		}
 	}
 
-	fmt.Println("By Id best img uri found was:", bestImg.ImageAssetRefs[0].URI)
-	if bestCropSet.CropSizeWidth > 0 {
-		fmt.Println("Best virtual cropset found w:", bestCropSet.CropSizeWidth, "h:", bestCropSet.CropSizeHeight, "x:", bestCropSet.TopLeftX, "y:", bestCropSet.TopLeftY)
-		return bestImg.ImageAssetRefs[0].URI, bestCropSet.CropSizeWidth, bestCropSet.CropSizeHeight, bestCropSet.TopLeftX, bestCropSet.TopLeftY
+	pd.log("By Id best img uri found was: " + bestImg.imageAssetRefs[0].uri)
+	if bestCropSet.cropSizeWeight > 0 {
+		pd.log("Best virtual cropset found w:" + uintToString(bestCropSet.cropSizeWeight) + ", h:" + uintToString(bestCropSet.cropSizeHeight) + ", x:" + intToString(bestCropSet.topLeftX) + ", y:" + intToString(bestCropSet.topLeftY))
+		return bestImg.imageAssetRefs[0].uri, bestCropSet.cropSizeWeight, bestCropSet.cropSizeHeight, bestCropSet.topLeftX, bestCropSet.topLeftY
 	}
-	return bestImg.ImageAssetRefs[0].URI, 0, 0, 0, 0
+	return bestImg.imageAssetRefs[0].uri, 0, 0, 0, 0
 }
 
-func generateImage(params parametersData, ah string, po string, idflag bool) ([]byte, string) {
+func generateImage(pd *parametersData, ah string, po string, idflag bool) ([]byte, string) {
 	//remove the original prefix of the path which is always 5 characters as it's uri/
 	//path to image
 	var p string
@@ -563,19 +622,19 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 
 	switch strings.Index(po, "mgid:") {
 	default:
-		fmt.Println("Params found for path: ", po)
+		pd.log("Params found for path: " + po)
 		//has parameters
 		mi := strings.Index(po, "/")
 		nv := po[:mi]
 		id = po[mi+1:]
 		//parse params
-		fmt.Println("index=", mi, "mgid=", id, "params=", mi, id, nv)
-		findParams(nv, id, &params)
+		pd.log("index: " + intToString(mi) + ", mgid: " + id + ", params: " + nv)
+		findParams(nv, id, pd)
 	case -1:
-		fmt.Println("404: Invalid image request")
+		pd.log("404: Invalid image request")
 		return nil, ""
 	case 0:
-		fmt.Println("No params found for path: ", po)
+		pd.log("No params found for path: " + po)
 		id = po
 	}
 
@@ -585,41 +644,39 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 	//handle logic for fetching image by item id or by image mgid
 	//TODO: refactor me
 	if idflag == true {
-		id, cw, ch, cx, cy = getBestImageByMgidId(id, params.rw, params.rh)
+		id, cw, ch, cx, cy = getBestImageByMgidID(id, pd)
 		p = strings.Replace(id, ":", "_", -1)
 		if cw > 0 && ch > 0 {
-			params.cw = cw
-			params.ch = ch
-			params.cx = cx
-			params.cy = cy
+			pd.cw = cw
+			pd.ch = ch
+			pd.cx = cx
+			pd.cy = cy
 		}
 
 		if id == "" || p == "" {
 			//no image found so return missing image
-			loadMissingImage(mw)
+			loadMissingImage(mw, pd)
 			fp = imgBaseDir + imageNotFoundPath
 		} else {
 			fp = imgBaseDir + p
 		}
-
-		fmt.Println("File Path:", fp)
-
+		pd.log("File Path: " + fp)
 	} else {
 		p = strings.Replace(id, ":", "_", -1)
 
 		if p == "" {
-			fmt.Println("Invalid id requested: ", id)
+			pd.log("Invalid id requested: " + id)
 			return nil, ""
 		}
 
 		fp = imgBaseDir + p
-		fmt.Println("File Path:", fp)
+		pd.log("File Path: " + fp)
 	}
 
-	if cacheRefresh {
+	if pd.cacheRefresh {
 		crerr := os.Remove(fp)
 		if crerr != nil {
-			fmt.Println("error deleting local cached image", crerr)
+			pd.log("error deleting local cached image: " + crerr.Error())
 		}
 	}
 	//check if the file exists
@@ -627,52 +684,66 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 	if err != nil {
 		//file not found locally fetch remote
 		//see if any other process is fetching the image.  if so then return 404 for now.
-		if setImageFetchLock(fp) == true {
-			fetchRemoteImageURL(id, p, mw)
+		if pd.cacheRefresh || setImageFetchLock(fp, pd) {
+			fetchRemoteImageURL(id, p, pd, mw)
 		} else {
-			loadMissingImage(mw)
+			loadMissingImage(mw, pd)
 			fp = imgBaseDir + imageNotFoundPath
 		}
 	}
 	if err == nil {
-		fmt.Println("Found image locally: ", fp)
+		pd.log("Found image locally: " + fp)
 		mw.ReadImageBlob(i)
 	}
 
 	//get image format/extension and set it for mw
-	params.f = getImageFormat(fp, p, ah)
-	fmt.Println("Extension is:", params.f, "for path:", fp)
-	mw.SetImageFormat(params.f)
-	mw.SetFormat(params.f)
+	pd.f = getImageFormat(fp, pd.f, ah, mw.GetImageAlphaChannel(), pd)
+	mw.GetImageAlphaChannel()
+	pd.log("Extension is:" + pd.f + ", for path: " + fp)
+	mw.SetImageFormat(pd.f)
+	mw.SetFormat(pd.f)
 
 	//CoalesceImages to break image into layers.  Must be called before any image layer specific operations.
 	mw = mw.CoalesceImages()
 
 	//Handle Crop
-	if params.cw > 0 && params.ch > 0 {
+	if pd.cw > 0 && pd.ch > 0 {
 		for i := 0; i < int(mw.GetNumberImages()); i++ {
 			mw.SetIteratorIndex(i)
-			x := params.cx
-			y := params.cy
-			if params.cc {
+			x := pd.cx
+			y := pd.cy
+			if pd.cc {
 				//calculate the x and y for the offset
 				// need to fix issue with trying to do math on uint values and how to cast to int from uint
-				x = (int(mw.GetImageWidth()) - int(params.cw)) / 2
-				y = (int(mw.GetImageHeight()) - int(params.ch)) / 2
+				x = (int(mw.GetImageWidth()) - int(pd.cw)) / 2
+				y = (int(mw.GetImageHeight()) - int(pd.ch)) / 2
 			}
-			fmt.Println("Crop image: ", fp, " x=", x, ", y=", y)
-			mw.CropImage(params.cw, params.ch, x, y)
-			mw.SetImagePage(params.cw, params.ch, 0, 0)
+			pd.log("Crop image: " + fp + " x=" + intToString(x) + ", y=" + intToString(y))
+			mw.CropImage(pd.cw, pd.ch, x, y)
+			mw.SetImagePage(pd.cw, pd.ch, 0, 0)
 		}
 	}
 
 	//Handle Resize
-	if params.rw > 0 || params.rh > 0 {
-		fmt.Println("Resizing image:", id, ", width:", params.rw, "height:", params.rh)
+	if pd.rw > 0 || pd.rh > 0 {
 		for i := 0; i < int(mw.GetNumberImages()); i++ {
 			mw.SetIteratorIndex(i)
-			mw.ThumbnailImage(params.rw, params.rh)
-			mw.SetImagePage(params.rw, params.rh, 0, 0)
+			x := mw.GetImageWidth()
+			y := mw.GetImageHeight()
+			ratio := uint((float64(x) / float64(y)) * 100)
+			if pd.rw > 0 && pd.rh == 0 {
+				x = pd.rw
+				y = (pd.rw * ratio) / 100
+			}
+			if pd.rh > 0 && pd.rw == 0 {
+				x = (pd.rh * ratio / 100)
+				y = pd.rh
+			}
+			tierr := mw.ThumbnailImage(x, y)
+			if tierr != nil {
+				pd.log("Failed to create thumbnail image: " + tierr.Error())
+			}
+			mw.SetImagePage(pd.rw, pd.rh, 0, 0)
 		}
 	}
 
@@ -680,40 +751,61 @@ func generateImage(params parametersData, ah string, po string, idflag bool) ([]
 	mw = mw.DeconstructImages()
 
 	//Handle Normalize
-	if params.n {
-		mw.NormalizeImageChannel(imagick.CHANNELS_ALL)
+	if pd.n {
+		mw.NormalizeImage()
 	}
 
+	mw.SetOption("png:compression-level", "9")
+	mw.SetOption("png:compression-filter", "5")
+	mw.SetOption("png:compression-strategy", "1")
+	mw.SetOption("jpeg:fancy-upsampling", "off")
+	mw.SetOption("filter:support", "2")
+	mw.SetOption("png:exclude-chunk", "all")
+	mw.SetColorspace(imagick.COLORSPACE_SRGB)
+	// mw.SetInterlaceScheme(imagick.INTERLACE_NO)
+	// mw.SharpenImage(0.25, 0.25)
+	// mw.PosterizeImage(136, false)
+
 	//Handle Quality
-	if params.q > 0 {
-		switch params.f {
+	if pd.q > 0 {
+		switch pd.f {
 		case "png":
+			// the image format is a pain so please don't use it if possible
+			mw.SetImageCompression(imagick.COMPRESSION_LOSSLESS_JPEG)
+			mw.SetImageCompressionQuality(pd.q)
 		case "webp":
 			mw.SetImageCompression(imagick.COMPRESSION_LOSSLESS_JPEG)
-			break
+			mw.SetImageCompressionQuality(pd.q)
 		case "jpg":
-		case "jpeg":
-		default:
 			mw.SetImageCompression(imagick.COMPRESSION_JPEG)
-			break
+			mw.SetImageCompressionQuality(pd.q)
 		}
-		mw.SetImageCompressionQuality(params.q)
 	}
 
 	mw.StripImage()
 
-	return mw.GetImageBlob(), params.f
+	return mw.GetImageBlob(), pd.f
+}
+
+func outputDebug(w http.ResponseWriter, pd *parametersData) {
+	w.Header().Set("Content-Type", "text/html")
+	t := "<html><body><h1>Debug Output:</h1>"
+	for _, v := range pd.msgs {
+		t += "<li>" + v + "</li>"
+	}
+	t += "</body></html>"
+	fmt.Fprint(w, t)
 }
 
 func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 	//params init
-	var params parametersData
+	var pd parametersData
 	var i []byte
 	var err error
 	var f string
 	var cc *redis.StringCmd
-	params.cc = false
-	params.n = false
+	pd.cc = false
+	pd.n = false
 
 	qs := r.URL.Query()
 
@@ -723,20 +815,24 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, cacheRefresh = qs["cacheRefresh"]
+	_, pd.cacheRefresh = qs["cacheRefresh"]
+	_, pd.debug = qs["debug"]
 
 	//check to see if the image is in redis cache
-	if cacheRefresh == false {
+	if pd.cacheRefresh == false {
 		cc = redisClient.Get(redisKeyCachePrefix + r.URL.Path)
 		i, err = cc.Bytes()
 	}
 
 	if i != nil {
-		fmt.Println("Image cache found for", r.URL.Path)
+		pd.log("Image cache found for: " + r.URL.Path)
 		cc = redisClient.Get(redisKeyCacheFormatPrefix + r.URL.Path)
+		if pd.debug {
+			pd.log("Expires in: " + redisClient.TTL(redisKeyCacheFormatPrefix+r.URL.Path).Val().String())
+		}
 		f = cc.Val()
 		if f == "" {
-			fmt.Println("Error while retrieving cache data for redis", err)
+			pd.log("Error while retrieving cache data for redis: " + err.Error())
 			//setting i to nil to force the image generation because we didn't get a format for the image cache
 			i = nil
 		}
@@ -744,14 +840,14 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 
 	//if not then create the image
 	if i == nil {
-		fmt.Println("Generating image for", r.URL.Path)
+		pd.log("Generating image for " + r.URL.Path)
 		//remove the original prefix of the path which is always 5 characters as it's uri/
-		i, f = generateImage(params, r.Header.Get("Accept"), r.URL.Path[5:], false)
+		i, f = generateImage(&pd, r.Header.Get("Accept"), r.URL.Path[5:], false)
 		//add to redis cache
 		scf := redisClient.Set(redisKeyCacheFormatPrefix+r.URL.Path, f, imageCacheTimeout)
 		if scf.Err() != nil {
 			//failed to save the image cache to redis
-			fmt.Println("Failed to save an image format to redis cache", r.URL.Path, scf.Err())
+			pd.log("Failed to save an image format to redis cache: " + r.URL.Path + ", Error: " + scf.Err().Error())
 			//skipping error as we can still survive
 		}
 
@@ -759,7 +855,7 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 			scc := redisClient.Set(redisKeyCachePrefix+r.URL.Path, i, imageCacheTimeout)
 			if scc.Err() != nil {
 				//failed to save the image cache to redis
-				fmt.Println("Failed to save an image to redis cache", r.URL.Path, scc.Err())
+				pd.log("Failed to save an image to redis cache: " + r.URL.Path + ", Error: " + scc.Err().Error())
 				//skipping error as we can still survive
 			}
 		}
@@ -771,19 +867,23 @@ func handlerImageURI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if pd.debug {
+		outputDebug(w, &pd)
+		return
+	}
 	w.Header().Set("Content-Type", "image/"+f)
 	w.Write(i)
 }
 
-func handlerImageId(w http.ResponseWriter, r *http.Request) {
+func handlerImageID(w http.ResponseWriter, r *http.Request) {
 	//params init
-	var params parametersData
+	var pd parametersData
 	var i []byte
 	var err error
 	var f string
 	var cc *redis.StringCmd
-	params.cc = false
-	params.n = false
+	pd.cc = false
+	pd.n = false
 
 	qs := r.URL.Query()
 
@@ -793,20 +893,21 @@ func handlerImageId(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, cacheRefresh = qs["cacheRefresh"]
+	_, pd.cacheRefresh = qs["cacheRefresh"]
+	_, pd.debug = qs["debug"]
 
 	//check to see if the image is in redis cache
-	if cacheRefresh == false {
+	if pd.cacheRefresh == false {
 		cc = redisClient.Get(redisKeyCachePrefix + r.URL.Path)
 		i, err = cc.Bytes()
 	}
 
 	if i != nil {
-		fmt.Println("Image cache found for", r.URL.Path)
+		pd.log("Image cache found for " + r.URL.Path)
 		cc = redisClient.Get(redisKeyCacheFormatPrefix + r.URL.Path)
 		f = cc.Val()
 		if f == "" {
-			fmt.Println("Error while retrieving cache data for redis", err)
+			pd.log("Error while retrieving cache data for redis: " + err.Error())
 			//setting i to nil to force the image generation because we didn't get a format for the image cache
 			i = nil
 		}
@@ -814,16 +915,17 @@ func handlerImageId(w http.ResponseWriter, r *http.Request) {
 
 	//if not then create the image
 	if i == nil {
-		fmt.Println("Fetching image information")
+		pd.log("Fetching image information")
 
-		fmt.Println("Generating image for", r.URL.Path)
+		pd.log("Generating image for " + r.URL.Path)
 		//remove the original prefix of the path which is always 5 characters as it's uri/
-		i, f = generateImage(params, r.Header.Get("Accept"), r.URL.Path[5:], true)
+		i, f = generateImage(&pd, r.Header.Get("Accept"), r.URL.Path[5:], true)
 		//add to redis cache
 		scf := redisClient.Set(redisKeyCacheFormatPrefix+r.URL.Path, f, imageCacheTimeout)
 		if scf.Err() != nil {
 			//failed to save the image cache to redis
 			fmt.Println("Failed to save an image format to redis cache", r.URL.Path, scf.Err())
+			pd.log("Failed to save an image format to redis cache: " + r.URL.Path + ", Error: " + scf.Err().Error())
 			//skipping error as we can still survive
 		}
 
@@ -840,6 +942,14 @@ func handlerImageId(w http.ResponseWriter, r *http.Request) {
 	//everything failed check
 	if i == nil {
 		//need to have a better error handling here, at least set 404 but this should only occur when the default img is not working
+		pd.log("No image data found due to missing default image")
+		if pd.debug == false {
+			return
+		}
+	}
+
+	if pd.debug {
+		outputDebug(w, &pd)
 		return
 	}
 
@@ -864,15 +974,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	imgIdDomain := os.Getenv("IMG_ID_URL")
-	if imgIdDomain == "" {
+	imgIDDomain := os.Getenv("IMG_ID_URL")
+	if imgIDDomain == "" {
 		fmt.Println("Missing environment variable IMG_ID_URL which should be the path to the image data object server with a slash on the end")
 		os.Exit(1)
 	}
-	imageIdQuery = imgIdDomain + imageIdQueryString
+	imageIDQuery = imgIDDomain + imageIDQueryString
 
 	imagick.Initialize()
-	defer imagick.Terminate()
 
 	redisADDR = os.Getenv("REDIS_PORT_6379_TCP_ADDR")
 	if redisADDR == "" {
@@ -885,34 +994,10 @@ func main() {
 		DB:       0,  // use default DB
 	})
 
-	pong, err := redisClient.Ping().Result()
-	fmt.Println("Redis server ping result:", pong, err)
-
 	fmt.Println("Image Server Ready")
 
-	//sess, err := session.NewSession(&aws.Config{
-	//	Region: aws.String("us-east-1")},
-	//)
-
-	// Create S3 service client
-	//s3Client := s3.New(sess)
-	//
-	//resp, err := s3Client.ListObjects(&s3.ListObjectsInput{Bucket: aws.String("images-viacom")})
-	//
-	//if err != nil {
-	//	fmt.Println("Unable to list items in bucket", err)
-	//}
-	//
-	//for _, item := range resp.Contents {
-	//	fmt.Println("Name:         ", *item.Key)
-	//	fmt.Println("Last modified:", *item.LastModified)
-	//	fmt.Println("Size:         ", *item.Size)
-	//	fmt.Println("Storage class:", *item.StorageClass)
-	//	fmt.Println("")
-	//}
-
 	http.HandleFunc("/uri/", handlerImageURI)
-	http.HandleFunc("/oid/", handlerImageId)
+	http.HandleFunc("/oid/", handlerImageID)
 	http.HandleFunc("/", handlerHelp)
 	http.ListenAndServe(":8080", nil)
 }

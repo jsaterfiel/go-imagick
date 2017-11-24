@@ -54,9 +54,14 @@ docker run -it \
 -e DEFAULT_IMG=images/cc_missing_v6.jpg \
 -p 8080:8080 \
 --link redis:redis \
---rm --name="go-images" go-images /go/src/app/main
+--rm \
+-v /Users/saterfij/projects/go-imagick:/go/src/app \
+--name="go-images" go-images /go/src/app/main
 ```
-
+export IMG_ID_URL="http://ent.mongo-arc-v2.mtvnservices.com/"
+export REMOTE_IMG_URL="https://comedycentral.mtvnimages.com/"
+export IMG_PATH="/tmp/images/"
+export DEFAULT_IMG="images/cc_missing_v6.jpg"
 Example url to call:
 ```
 http://localhost:8080/uri/rw=480:rh=320:ch=600:cw=800:cx=200:cy=200:q=50/mgid:file:gsp:entertainment-assets:/cc/images/shows/tds/videos/season_21/21095/ds_21_095_act2.jpg
