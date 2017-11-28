@@ -705,9 +705,9 @@ func generateImage(pd *parametersData, ah string, po string, idflag bool) ([]byt
 	mw.SetFormat(pd.f)
 
 	//CoalesceImages to break image into layers.  Must be called before any image layer specific operations.
-	// aw := mw.CoalesceImages()
-	// mw.Destroy()
-	fmt.Println(mw.IdentifyImage())
+	aw := mw.CoalesceImages()
+	mw.Destroy()
+	mw = aw
 
 	//Handle Crop
 	if pd.cw > 0 && pd.ch > 0 {
@@ -751,8 +751,9 @@ func generateImage(pd *parametersData, ah string, po string, idflag bool) ([]byt
 	}
 
 	//DeconstructImages after all resize and other image layer specifc operations
-	// mw = aw.DeconstructImages()
-	// aw.Destroy()
+	aw = mw.DeconstructImages()
+	mw.Destroy()
+	mw = aw
 
 	//Handle Normalize
 	if pd.n {
