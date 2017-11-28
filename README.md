@@ -56,6 +56,7 @@ docker run -it \
 --link redis:redis \
 --rm \
 -v /Users/saterfij/projects/go-imagick:/go/src/app \
+-v /tmp:/tmp \
 --name="go-images" go-images /go/src/app/main
 ```
 export IMG_ID_URL="http://ent.mongo-arc-v2.mtvnservices.com/"

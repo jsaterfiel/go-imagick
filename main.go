@@ -334,7 +334,7 @@ func fetchRemoteImageURL(m string, p string, pd *parametersData, mw *imagick.Mag
 
 	//get image folder path
 	ifi := strings.LastIndex(p, "/")
-	ifp := imgBaseDir + "/" + p[:ifi]
+	ifp := imgBaseDir + p[:ifi]
 
 	pd.log("Creating Directories: " + ifp)
 
@@ -345,7 +345,7 @@ func fetchRemoteImageURL(m string, p string, pd *parametersData, mw *imagick.Mag
 		panic(err)
 	}
 
-	ip := imgBaseDir + "/" + p
+	ip := imgBaseDir + p
 	f, err := os.Create(ip)
 
 	if err != nil {
@@ -356,13 +356,14 @@ func fetchRemoteImageURL(m string, p string, pd *parametersData, mw *imagick.Mag
 	}
 
 	ib, err := f.Write(i)
-	pd.log("Bytes written to file: " + ip)
+	pd.log("Bytes written to file: " + fmt.Sprint(ib))
 	if ib < 1 && err != nil {
 		fmt.Println("Failed to write to file: ", ip)
 		pd.log("Failed to write to file: " + err.Error())
 		panic(err)
 	}
 	mw.ReadImageBlob(i)
+	//mw.ReadImageFile(f)
 }
 
 func saveImageInS3(path string, data []byte, pd *parametersData) {
@@ -704,7 +705,9 @@ func generateImage(pd *parametersData, ah string, po string, idflag bool) ([]byt
 	mw.SetFormat(pd.f)
 
 	//CoalesceImages to break image into layers.  Must be called before any image layer specific operations.
-	mw = mw.CoalesceImages()
+	// aw := mw.CoalesceImages()
+	// mw.Destroy()
+	fmt.Println(mw.IdentifyImage())
 
 	//Handle Crop
 	if pd.cw > 0 && pd.ch > 0 {
@@ -748,7 +751,8 @@ func generateImage(pd *parametersData, ah string, po string, idflag bool) ([]byt
 	}
 
 	//DeconstructImages after all resize and other image layer specifc operations
-	mw = mw.DeconstructImages()
+	// mw = aw.DeconstructImages()
+	// aw.Destroy()
 
 	//Handle Normalize
 	if pd.n {
@@ -784,7 +788,9 @@ func generateImage(pd *parametersData, ah string, po string, idflag bool) ([]byt
 
 	mw.StripImage()
 
-	return mw.GetImageBlob(), pd.f
+	ib := mw.GetImageBlob()
+	mw.Destroy()
+	return ib, pd.f
 }
 
 func outputDebug(w http.ResponseWriter, pd *parametersData) {
@@ -982,6 +988,7 @@ func main() {
 	imageIDQuery = imgIDDomain + imageIDQueryString
 
 	imagick.Initialize()
+	//defer imagick.Terminate()
 
 	redisADDR = os.Getenv("REDIS_PORT_6379_TCP_ADDR")
 	if redisADDR == "" {
